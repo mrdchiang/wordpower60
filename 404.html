@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Redirecting...</title>
+<script>
+(function(){
+  var path = location.pathname;
+  var base = '/wordpower60';
+  if (path.indexOf(base) === 0) path = path.slice(base.length);
+  if (path.charAt(0) === '/') path = path.slice(1);
+  location.replace(base + '/#' + (path || ''));
+})();
+</script>
+</head>
+<body>
+<p>Redirecting to <a href="#" id="link">the board</a>...</p>
+<noscript>JavaScript required.</noscript>
+<script>
+document.getElementById('link').href = (location.hash || '#').slice(1) || '/wordpower60/';
+</script>
+</body>
+</html>
