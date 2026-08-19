@@ -18,7 +18,7 @@
   }
   *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;}
   html,body{height:100%;overflow:hidden;background:#e8e4dc;font-family:Arial,Helvetica,sans-serif;}
-  #app{height:100dvh;display:flex;flex-direction:column;}
+  #app{height:100vh;height:100dvh;display:flex;flex-direction:column;}
 
   /* ===== Header ===== */
   header{
@@ -66,10 +66,11 @@
     box-shadow:0 1px 2px rgba(0,0,0,.08);
   }
   .cell:active{transform:scale(.96);}
+  .cell,.mbtn,.hbtn{touch-action:manipulation;}
   .cell svg{width:min(52%,64px);height:auto;flex-shrink:0;max-height:70%;}
   .cell .label{
     font-size:clamp(11px,2.1vmin,17px);font-weight:bold;color:var(--ink);
-    line-height:1.1;text-align:center;padding:0 2px;
+    line-height:1.1;text-align:center;padding:0 2px;overflow-wrap:anywhere;
   }
   .cell.lblonly svg{display:none;}
   .cell.lblonly .label{font-size:clamp(15px,3vmin,24px);}
@@ -232,7 +233,7 @@ const ROWS = [
     {t:'open',    icon:'open'},
     {t:'put',     icon:'put'},
     {t:'in',      icon:'arrowIn'},
-    {t:'look/see',icon:'eye'},
+    {t:'look/see',icon:'eye',s:'look see'},
     {t:'on',      icon:''},
   ]},
   {cls:'r5', cells:[
@@ -281,6 +282,16 @@ const msg = document.getElementById('msg');
 let sentence = [];          // array of words in the message window
 let voice = null;
 const synth = window.speechSynthesis;
+let speakTimer = null;      // iOS: cancel->speak race needs a delay
+let lastTapAt = 0;          // double-tap guard for accidental second taps
+let lastTapBtn = null;      // ...only on the SAME button
+
+function savePref(k, v){
+  try{ localStorage.setItem(k, v); }catch(e){ /* private mode / restricted webview — ignore */ }
+}
+function loadPref(k){
+  try{ return localStorage.getItem(k); }catch(e){ return null; }
+}
 
 function loadVoices(){
   const sel = document.getElementById('voiceSel');
@@ -301,28 +312,34 @@ function loadVoices(){
   sel.value = (prev && [...sel.options].some(o=>o.value===prev)) ? prev
     : (preferred[0] ? preferred[0].value : (voices[0].name));
   voice = synth.getVoices().find(v=>v.name===sel.value) || null;
-  localStorage.setItem('wp60-voice', sel.value);
+  savePref('wp60-voice', sel.value);
 }
-if(synth.onvoiceschanged !== undefined) synth.onvoiceschanged = loadVoices;
-loadVoices();
+if(synth && synth.onvoiceschanged !== undefined) synth.onvoiceschanged = loadVoices;
+if(synth) loadVoices();
 document.getElementById('voiceSel').addEventListener('change', e=>{
   voice = synth.getVoices().find(v=>v.name===e.target.value) || null;
-  localStorage.setItem('wp60-voice', e.target.value);
-  speak('OK', true);
+  savePref('wp60-voice', e.target.value);
+  speak('OK');
 });
 
-function speak(text, silentFail){
+function speak(text){
   if(!synth || !text) return;
-  synth.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  if(voice) u.voice = voice;
-  u.lang = (voice && voice.lang) || 'en-US';
-  u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;
-  u.onerror = e=>{
-    if(e.error==='not-allowed') return; // user hasn't gestured yet on some browsers
-    toast('Voice error: ' + e.error + '. Try tapping a word first.');
-  };
-  synth.speak(u);
+  // iOS Safari: cancel() followed by speak() in the same task drops audio.
+  // Delay the new utterance so rapid taps always produce sound.
+  clearTimeout(speakTimer);
+  speakTimer = setTimeout(()=>{
+    try{ synth.cancel(); }catch(e){}
+    const u = new SpeechSynthesisUtterance(text);
+    if(voice) u.voice = voice;
+    u.lang = (voice && voice.lang) || 'en-US';
+    u.rate = 0.9; u.pitch = 1.0; u.volume = 1.0;   // slightly slower = clearer for a 4yo
+    u.onerror = e=>{
+      if(e.error !== 'not-allowed' && e.error !== 'interrupted' && e.error !== 'canceled'){
+        toast('Voice error: ' + e.error);
+      }
+    };
+    synth.speak(u);
+  }, 80);
 }
 
 function toast(t){
@@ -335,18 +352,37 @@ function toast(t){
 
 /* ---------- Interactions ---------- */
 function pressCell(btn, cell){
+  // double-tap guard: ignore a second tap on the SAME button within 350ms
+  // (accidental double-taps), but allow fast taps across different buttons
+  // so sentence building ("I want more") is never blocked.
+  const now = Date.now();
+  if(btn === lastTapBtn && now - lastTapAt < 350) return;
+  lastTapBtn = btn;
+  lastTapAt = now;
   btn.classList.remove('flash');
   void btn.offsetWidth;          // restart animation
   btn.classList.add('flash');
-  speak(cell.t);                 // 1) speak the word immediately
+  speak(cell.s || cell.t);       // 1) speak the word immediately (spoken form overrides label)
   sentence.push(cell.t);         // 2) add to message window
   renderMsg();
 }
 
 function renderMsg(){
-  msg.innerHTML = sentence.map(w=>'<span class="word">'+w+'</span>').join('');
+  msg.innerHTML = sentence.map((w,i)=>
+    '<span class="word" data-i="'+i+'">'+w+'</span>'
+  ).join('');
   msg.scrollLeft = msg.scrollWidth;
 }
+
+// tap a word chip in the message bar to remove just that word (undo a mis-tap)
+msg.addEventListener('click', e=>{
+  const chip = e.target.closest('.word');
+  if(!chip) return;
+  const i = parseInt(chip.dataset.i, 10);
+  if(isNaN(i)) return;
+  sentence.splice(i, 1);
+  renderMsg();
+});
 
 document.getElementById('btnSpeak').addEventListener('click', ()=>{
   if(sentence.length){
@@ -361,13 +397,21 @@ document.getElementById('btnClear').addEventListener('click', ()=>{
   renderMsg();
 });
 document.getElementById('btnFull').addEventListener('click', ()=>{
-  if(document.fullscreenElement) document.exitFullscreen();
-  else document.documentElement.requestFullscreen().catch(()=>toast('Fullscreen blocked by browser'));
+  if(document.fullscreenElement){ document.exitFullscreen(); return; }
+  // iOS Safari: Fullscreen API is not available for arbitrary elements
+  if(document.documentElement.requestFullscreen){
+    try{
+      document.documentElement.requestFullscreen()
+        .catch(()=>toast('Fullscreen blocked by browser'));
+    }catch(e){ toast('Fullscreen not supported here'); }
+  } else {
+    toast('Fullscreen not supported on this device');
+  }
 });
 
 /* restore saved voice on load */
 (function(){
-  const saved = localStorage.getItem('wp60-voice');
+  const saved = loadPref('wp60-voice');
   if(saved){ const sel=document.getElementById('voiceSel'); sel.value=saved; voice=synth.getVoices().find(v=>v.name===saved)||null; }
 })();
 </script>
